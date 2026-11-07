@@ -4,31 +4,35 @@ Last reviewed: 2026-11-07
 
 ## Repository baseline (static inspection)
 
-- The application is a Vite/React/TypeScript frontend. `src/main.tsx` mounts `src/App.tsx`; `App.tsx` currently routes between corporate operations dashboard views.
-- `src/components/SpatialEngine3D.tsx` contains a demonstration Three.js facility scene, local file import UI, measurement presets, and renderer lifecycle management.
-- Spatial utility modules exist for coordinate math, parsing, provenance hashing, and analytics.
-- The package scripts define `bun run lint` as `tsc --noEmit`, `bun run test`/`npm test` as the `tsx` test runner, and `bun run build` as `vite build`.
-- The repository does not currently have a configured application backend, database migration system, authentication/session implementation, or private object-storage integration in the inspected tree.
+- React/Vite/TypeScript client; current application shell remains the corporate operations console and the earlier local-only foundation screen.
+- `SpatialEngine3D.tsx` remains a demonstration Three.js facility scene and local importer; it is not connected to persisted projects.
+- Spatial math, parser, provenance, analytics, and project-schema utilities are present.
+- Existing package scripts: `bun run lint` (`tsc --noEmit`), `bun run test` (`tsx --test tests/**/*.test.ts`), and `bun run build` (`vite build`).
+- No shell execution was available to run these checks during this change. Previous test records are historical, not current validation.
 
-## Baseline verification
+## Phase 0 / baseline
 
-A shell or CI execution environment was not available during this review. The previous `docs/autonomous-engineering/TEST_RESULTS.md` records 38 passing tests dated 2026-11-06, but that is historical evidence and has not been rerun against this branch. Current type-check, tests, and build are therefore **not verified** here.
+Status: **STATIC AUDIT RECORDED; COMMANDS NOT EXECUTED**
 
-## Phase 1 foundation work
+- The inspected tree previously had no configured API process, database migrations, server authentication, or private object storage.
+- Existing tests cover spatial math/parsing/analytics/provenance and Three.js disposal. The API tests added here extend coverage but have not yet been executed.
 
-Status: **FOUNDATION**
+## Phase 1 / project service foundation
 
-- Added a renderer-independent, versioned spatial project document contract in `src/types/spatialProject.ts`.
-- Added runtime validation and an explicit draft-v0 to v1 migration in `src/utils/spatialProjectSchema.ts`.
-- Added schema validation and migration tests in `tests/spatialProjectSchema.test.ts`.
-- This is domain-schema groundwork only. It is not database persistence, authentication, authorization, project CRUD, or a completed project lifecycle.
+Status: **IN DEVELOPMENT (local API foundation; not production-ready)**
 
-## Known limitations and next work
+- `server/app.ts` adds an Express API with scrypt password derivation, opaque HttpOnly session cookie, authentication middleware, workspace/project membership checks, project CRUD core routes, revisions, audit events, input validation, and expected-revision conflict detection.
+- `server/app.ts` uses an atomic, serialized JSON file adapter. This is durable across restarts in a single process, but is explicitly a development-only adapter, not PostgreSQL and not safe for multi-process production.
+- `src/types/spatialProject.ts` and `src/utils/spatialProjectSchema.ts` define and validate the renderer-independent versioned project document.
+- `tests/projectApi.test.ts` contains API integration tests for registration, persisted reopen/revisions, unauthenticated/cross-user denial, stale revisions, weak password rejection, and invalid document rejection. Results are unverified until run.
+- The current `ProjectFoundationView` still uses its previous browser-local demo store and is NOT yet connected to this API; remove/replace that path during the next vertical-slice step. Do not treat its client-only permissions as a security boundary.
 
-1. Run `bun install`, `bun run lint`, `bun run test`, and `bun run build` in the project environment and fix any failures.
-2. Add a server-side persistence/API layer and reproducible database migrations. Select the PostgreSQL driver/deployment after confirming the supported runtime and deployment target.
-3. Implement secure identity and server-side authorization before exposing project APIs.
-4. Add integration tests for owner/workspace isolation, revisions, persistence, and failed saves.
-5. Connect project library and editor UI to the persisted project service; do not treat browser-only storage as authoritative.
+## Next work, in order
 
-No product capability is marked production-ready by this status report.
+1. Execute install, typecheck, test, and build in CI/local shell; fix failures and refresh the lockfile with the chosen package manager.
+2. Add API-backed browser client and remove insecure local password/session storage from the application path.
+3. Add database interface and PostgreSQL migration/adapter before any production deployment.
+4. Add stronger auth controls (rate limiting, account recovery/email verification, session revocation UI), request/response schemas, CSRF/origin policy review, and security tests.
+5. Implement editor operations, persistent autosave, undo/redo, and generated revision summaries against the authenticated API.
+
+No capability is marked production-ready.
