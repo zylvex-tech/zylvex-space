@@ -1,325 +1,283 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  AppUser,
-  archiveProject,
-  createAuthDemoUser,
-  createDefaultRoomProject,
-  createProject,
-  ensureStorageReady,
-  getAppState,
-  getCurrentUser,
-  getProjectById,
-  inviteProjectMember,
-  listProjectsForUser,
-  loginUser,
-  logoutUser,
-  readSession,
-  registerUser,
-  restoreProject,
-  saveProject,
-  isProjectAuthorizedForUser,
-  createProjectDemoData
-} from '../lib/projectFoundation';
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { ApiError, ApiProject, ApiProjectSummary, ApiRevision, ApiUser, ApiWorkspace, projectApi } from '../lib/projectApi';
+import { Measurement, SpatialProjectDocument, Wall } from '../types/spatialProject';
 
-const keyFromProject = (projectId: string) => `zylvex-space-project-${projectId}`;
+const id = (prefix: string) => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+const panel: React.CSSProperties = { background: '#020817', border: '1px solid #1e293b', borderRadius: 16, padding: 18 };
+const inputStyle: React.CSSProperties = { width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 9, padding: 11, color: '#e2e8f0', boxSizing: 'border-box' };
+const buttonStyle: React.CSSProperties = { background: '#0ea5e9', color: '#fff', border: 0, borderRadius: 9, padding: '10px 14px', fontWeight: 700, cursor: 'pointer' };
+
+function errorText(error: unknown): string {
+  if (error instanceof ApiError && error.code === 'REVISION_CONFLICT') return 'This project changed elsewhere. Reload the latest revision before saving your edits.';
+  return error instanceof Error ? error.message : 'The request could not be completed.';
+}
+
+function roomWalls(roomId: string, x: number, y: number, length: number, width: number, height: number): Wall[] {
+  const points = [
+    { x, y }, { x: x + length, y }, { x: x + length, y: y + width }, { x, y: y + width }
+  ];
+  return points.map((start, index) => ({
+    id: id('wall'), roomId, start, end: points[(index + 1) % points.length], thicknessMeters: 0.12, heightMeters: height, openings: []
+  }));
+}
+
+function manualLengthMeasurement(roomId: string, length: number, authorId: string): Measurement {
+  return {
+    id: id('measurement'), kind: 'length', value: length, unit: 'm', label: 'Room length', geometryIds: [roomId],
+    provenance: {
+      source: 'manual', method: 'Entered by the user', capturedAt: new Date().toISOString(), authorId,
+      deviceId: null, confidence: null, uncertaintyMeters: null, reviewState: 'unreviewed', sha256: null
+    }
+  };
+}
 
 export const ProjectFoundationView: React.FC = () => {
-  const [user, setUser] = useState<AppUser | null>(null);
-  const [projects, setProjects] = useState<any[]>([]);
+  const [user, setUser] = useState<ApiUser | null>(null);
+  const [workspaces, setWorkspaces] = useState<ApiWorkspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState('');
+  const [projects, setProjects] = useState<ApiProjectSummary[]>([]);
+  const [project, setProject] = useState<ApiProject | null>(null);
+  const [revisions, setRevisions] = useState<ApiRevision[]>([]);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [form, setForm] = useState({ name: '', email: 'demo@zylvex.local', password: 'Password123' });
+  const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [projectName, setProjectName] = useState('My room project');
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [selectedDoc, setSelectedDoc] = useState<any | null>(null);
-  const [message, setMessage] = useState<string>('');
-  const [inviteEmail, setInviteEmail] = useState('');
+  const [roomForm, setRoomForm] = useState({ name: 'Living room', length: '5', width: '4', height: '2.8' });
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const refreshProjects = () => {
-    if (!user) {
-      setProjects([]);
-      return;
+  const reportError = (error: unknown) => setMessage(errorText(error));
+  const loadWorkspaceData = useCallback(async (nextWorkspaceId?: string) => {
+    const [workspaceResult] = await Promise.all([projectApi.workspaces()]);
+    setWorkspaces(workspaceResult.workspaces);
+    const selected = nextWorkspaceId ?? workspaceId ?? workspaceResult.workspaces[0]?.id ?? '';
+    setWorkspaceId(selected);
+    const projectResult = await projectApi.projects(selected || undefined);
+    setProjects(projectResult.projects);
+    if (project?.id && projectResult.projects.some((item) => item.id === project.id)) {
+      const refreshed = await projectApi.project(project.id);
+      setProject(refreshed.project);
+      const history = await projectApi.revisions(project.id);
+      setRevisions(history.revisions);
+    } else {
+      setProject(null);
+      setRevisions([]);
     }
-    setProjects(listProjectsForUser(user.id));
-  };
+  }, [workspaceId, project?.id]);
 
   useEffect(() => {
-    ensureStorageReady();
-    const active = getCurrentUser();
-    if (active) {
-      setUser(active);
-      const nextProjects = createProjectDemoData(active.id);
-      setProjects(nextProjects);
-      if (!selectedProjectId && nextProjects[0]) setSelectedProjectId(nextProjects[0].id);
-    }
+    let mounted = true;
+    projectApi.me().then(async ({ user: current }) => {
+      if (!mounted) return;
+      setUser(current);
+      const result = await projectApi.workspaces();
+      if (!mounted) return;
+      setWorkspaces(result.workspaces);
+      const firstWorkspace = result.workspaces[0];
+      setWorkspaceId(firstWorkspace?.id ?? '');
+      const listed = await projectApi.projects(firstWorkspace?.id);
+      if (!mounted) return;
+      setProjects(listed.projects);
+    }).catch((error: unknown) => {
+      if (mounted && (!(error instanceof ApiError) || error.status !== 401)) reportError(error);
+    });
+    return () => { mounted = false; };
   }, []);
 
-  useEffect(() => {
-    if (user) {
-      refreshProjects();
-    }
-  }, [user]);
+  const roomCount = useMemo(() => project?.document.floors.reduce((sum, floor) => sum + floor.rooms.length, 0) ?? 0, [project]);
 
-  useEffect(() => {
-    if (!user || !selectedProjectId) return;
+  const authenticate = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setMessage('');
     try {
-      const project = getProjectById(selectedProjectId, user.id);
-      setSelectedDoc(project.doc);
-    } catch {
-      setSelectedDoc(null);
+      const result = authMode === 'register'
+        ? await projectApi.register(form)
+        : await projectApi.login({ email: form.email, password: form.password });
+      setUser(result.user);
+      setForm({ name: '', email: '', password: '' });
+      const resultWorkspaces = await projectApi.workspaces();
+      setWorkspaces(resultWorkspaces.workspaces);
+      const first = resultWorkspaces.workspaces[0];
+      setWorkspaceId(first?.id ?? '');
+      const listed = await projectApi.projects(first?.id);
+      setProjects(listed.projects);
+      setProject(null);
+      setMessage(authMode === 'register' ? 'Account created.' : 'Signed in.');
+    } catch (error) { reportError(error); }
+    finally { setBusy(false); }
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    try { await projectApi.logout(); }
+    catch (error) { reportError(error); }
+    finally {
+      setUser(null); setWorkspaces([]); setProjects([]); setProject(null); setRevisions([]); setBusy(false);
+      setMessage('Signed out.');
     }
-  }, [selectedProjectId, user, projects]);
-
-  const addRoom = () => {
-    if (!user || !selectedProjectId) return;
-    const project = getProjectById(selectedProjectId, user.id);
-    const nextDoc = { ...project.doc };
-    nextDoc.floors = nextDoc.floors.length ? nextDoc.floors : [{ id: 'floor-1', name: 'Ground floor', elevationMeters: 0, rooms: [], walls: [] }];
-    nextDoc.floors[0].rooms = nextDoc.floors[0].rooms.concat({
-      id: `room-${Date.now()}`,
-      name: 'New room',
-      lengthMeters: 5,
-      widthMeters: 4,
-      heightMeters: 2.8,
-      origin: { x: 0, y: 0 }
-    });
-    const updated = saveProject(selectedProjectId, user.id, nextDoc);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage('Room added and saved.');
   };
 
-  const addObject = () => {
-    if (!user || !selectedProjectId) return;
-    const project = getProjectById(selectedProjectId, user.id);
-    const nextDoc = { ...project.doc };
-    nextDoc.objects = nextDoc.objects.concat({
-      id: `object-${Date.now()}`,
-      name: 'New object',
-      category: 'furniture',
-      transform: { position: { x: 1.5, y: 0, z: 1.2 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
-      dimensionsMeters: { x: 0.6, y: 0.8, z: 0.6 },
-      materialId: null,
-      layerId: 'layer-1',
-      visible: true,
-      locked: false,
-      source: 'user-created',
-      assetId: null
-    });
-    const updated = saveProject(selectedProjectId, user.id, nextDoc);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage('Object placed into the active room.');
-  };
-
-  const saveCurrentProject = () => {
-    if (!user || !selectedProjectId || !selectedDoc) return;
-    const updated = saveProject(selectedProjectId, user.id, selectedDoc);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage('Project saved.');
-  };
-
-  const logIn = () => {
+  const openProject = async (projectId: string) => {
+    setBusy(true);
     try {
-      const nextUser = loginUser({ email: form.email, password: form.password });
-      setUser(nextUser);
-      setMessage(`Signed in as ${nextUser.name}.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Login failed');
-    }
+      const [{ project: opened }, { revisions: history }] = await Promise.all([projectApi.project(projectId), projectApi.revisions(projectId)]);
+      setProject(opened); setRevisions(history); setMessage(`Opened revision ${opened.currentRevision}.`);
+    } catch (error) { reportError(error); }
+    finally { setBusy(false); }
   };
 
-  const register = () => {
+  const createProject = async () => {
+    if (!workspaceId) { setMessage('Your account has no available workspace.'); return; }
+    setBusy(true);
     try {
-      const nextUser = registerUser({ name: form.name, email: form.email, password: form.password });
-      setUser(nextUser);
-      setMessage(`Registered ${nextUser.name}.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Registration failed');
+      const { project: created } = await projectApi.createProject(projectName.trim(), workspaceId);
+      setProjects((current) => [created, ...current]);
+      setProject(created);
+      setRevisions([{ id: `revision-${created.currentRevision}`, projectId: created.id, number: created.currentRevision, authorId: created.ownerId, createdAt: created.createdAt, summary: 'Project created' }]);
+      setMessage('Project created and saved by the API.');
+    } catch (error) { reportError(error); }
+    finally { setBusy(false); }
+  };
+
+  const save = async (document: SpatialProjectDocument) => {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const { project: saved } = await projectApi.saveProject(project.id, project.currentRevision, document);
+      setProject(saved);
+      await loadWorkspaceData(workspaceId);
+      const history = await projectApi.revisions(saved.id);
+      setRevisions(history.revisions);
+      setMessage(`Saved as revision ${saved.currentRevision}.`);
+    } catch (error) { reportError(error); }
+    finally { setBusy(false); }
+  };
+
+  const addRoom = async () => {
+    if (!project || !user) return;
+    const length = Number(roomForm.length); const width = Number(roomForm.width); const height = Number(roomForm.height);
+    if (![length, width, height].every(Number.isFinite) || length <= 0 || width <= 0 || height <= 0) {
+      setMessage('Room length, width, and height must be positive finite values in metres.'); return;
     }
+    const roomId = id('room');
+    const floor = project.document.floors[0];
+    if (!floor) { setMessage('The project has no floor to add a room to.'); return; }
+    const x = floor.rooms.reduce((max, room) => Math.max(max, room.origin.x + room.lengthMeters + 1), 0);
+    const next: SpatialProjectDocument = {
+      ...project.document,
+      floors: project.document.floors.map((item, index) => index !== 0 ? item : {
+        ...item,
+        rooms: [...item.rooms, { id: roomId, name: roomForm.name.trim() || 'Room', lengthMeters: length, widthMeters: width, heightMeters: height, origin: { x, y: 0 } }],
+        walls: [...item.walls, ...roomWalls(roomId, x, 0, length, width, height)]
+      }),
+      measurements: [...project.document.measurements, manualLengthMeasurement(roomId, length, user.id)]
+    };
+    await save(next);
   };
 
-  const createProjectAndOpen = () => {
-    if (!user) return;
-    const created = createProject({ name: projectName.trim() || 'Untitled project', ownerId: user.id, workspaceId: `workspace-${user.id}` });
-    setSelectedProjectId(created.id);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(created.doc);
-    setMessage('Project created.');
+  const addObject = async () => {
+    if (!project) return;
+    const layer = project.document.layers.find((item) => item.visible && !item.locked);
+    if (!layer) { setMessage('Create or unlock a visible layer before placing objects.'); return; }
+    const next: SpatialProjectDocument = {
+      ...project.document,
+      objects: [...project.document.objects, {
+        id: id('object'), name: 'Furniture item', category: 'furniture',
+        transform: { position: { x: 1, y: 0, z: 1 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        dimensionsMeters: { x: 0.6, y: 0.8, z: 0.6 }, materialId: null, layerId: layer.id,
+        visible: true, locked: false, source: 'user-created', assetId: null
+      }]
+    };
+    await save(next);
   };
 
-  const archiveSelected = () => {
-    if (!user || !selectedProjectId) return;
-    const updated = archiveProject(user.id, selectedProjectId);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage('Project archived.');
+  const archive = async () => {
+    if (!project) return;
+    setBusy(true);
+    try {
+      await projectApi.archiveProject(project.id);
+      setProject(null);
+      await loadWorkspaceData(workspaceId);
+      setMessage('Project archived.');
+    } catch (error) { reportError(error); }
+    finally { setBusy(false); }
   };
 
-  const restoreSelected = () => {
-    if (!user || !selectedProjectId) return;
-    const updated = restoreProject(user.id, selectedProjectId);
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage('Project restored.');
-  };
-
-  const shareProject = () => {
-    if (!user || !selectedProjectId || !inviteEmail.trim()) return;
-    const updated = inviteProjectMember(selectedProjectId, user.id, inviteEmail.trim(), 'editor');
-    setProjects(listProjectsForUser(user.id));
-    setSelectedDoc(updated.doc);
-    setMessage(`Shared project with ${inviteEmail.trim()}.`);
-    setInviteEmail('');
-  };
-
-  const activeProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? null, [projects, selectedProjectId]);
-
-  if (!user) {
-    return (
-      <div style={{ maxWidth: 560, margin: '48px auto', padding: 20 }}>
-        <div style={{ border: '1px solid #1e293b', borderRadius: 18, background: '#020817', padding: 28 }}>
-          <h2 style={{ margin: 0, fontSize: 28 }}>ZYLVEX SPACE Foundation</h2>
-          <p style={{ color: '#94a3b8', marginTop: 8 }}>Create an account or sign in to manage projects, room geometry, and saved project state.</p>
-          <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-            <button onClick={() => setAuthMode('login')} style={{ background: authMode === 'login' ? '#0ea5e9' : '#0f172a', color: '#e2e8f0', padding: '8px 12px', borderRadius: 10, border: '1px solid #334155' }}>Login</button>
-            <button onClick={() => setAuthMode('register')} style={{ background: authMode === 'register' ? '#0ea5e9' : '#0f172a', color: '#e2e8f0', padding: '8px 12px', borderRadius: 10, border: '1px solid #334155' }}>Register</button>
-          </div>
-          {authMode === 'register' && (
-            <div style={{ display: 'grid', gap: 12, marginTop: 20 }}>
-              <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Full name" style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 10, padding: 12, color: '#e2e8f0' }} />
-            </div>
-          )}
-          <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
-            <input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="Email" style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 10, padding: 12, color: '#e2e8f0' }} />
-            <input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="Password" style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 10, padding: 12, color: '#e2e8f0' }} />
-          </div>
-          <button onClick={authMode === 'register' ? register : logIn} style={{ marginTop: 22, width: '100%', background: '#0ea5e9', color: 'white', borderRadius: 10, border: 'none', padding: '12px 20px', fontWeight: 700 }}>
-            {authMode === 'register' ? 'Create account' : 'Continue to workspace'}
-          </button>
-          {message && <p style={{ color: '#e2e8f0', marginTop: 14 }}>{message}</p>}
-        </div>
-      </div>
-    );
-  }
+  if (!user) return (
+    <main style={{ maxWidth: 520, margin: '48px auto', padding: 20, color: '#e2e8f0' }}>
+      <section style={panel}>
+        <p style={{ color: '#22d3ee', textTransform: 'uppercase', letterSpacing: 1 }}>ZYLVEX SPACE · Project foundation</p>
+        <h1>{authMode === 'login' ? 'Sign in' : 'Create your account'}</h1>
+        <p style={{ color: '#94a3b8' }}>Authentication and project access are handled by the API. Projects are private unless shared.</p>
+        <form onSubmit={authenticate} style={{ display: 'grid', gap: 12 }}>
+          {authMode === 'register' && <label>Name<input required autoComplete="name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} style={inputStyle} /></label>}
+          <label>Email<input required type="email" autoComplete="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} style={inputStyle} /></label>
+          <label>Password<input required type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} style={inputStyle} /></label>
+          <button disabled={busy} style={buttonStyle}>{busy ? 'Please wait…' : authMode === 'register' ? 'Create account' : 'Sign in'}</button>
+        </form>
+        <button onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setMessage(''); }} style={{ ...buttonStyle, background: '#0f172a', marginTop: 12 }}>
+          {authMode === 'login' ? 'Need an account? Register' : 'Already registered? Sign in'}
+        </button>
+        {message && <p role="status">{message}</p>}
+      </section>
+    </main>
+  );
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 20, minHeight: 760 }}>
-      <aside style={{ background: '#020817', border: '1px solid #1e293b', borderRadius: 18, padding: 18 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <div style={{ color: '#cbd5e1', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Signed in</div>
-            <div style={{ fontWeight: 700 }}>{user.name}</div>
-          </div>
-          <button onClick={() => { logoutUser(); setUser(null); setSelectedProjectId(null); setSelectedDoc(null); setMessage('Signed out.'); }} style={{ background: '#0f172a', border: '1px solid #334155', color: '#e2e8f0', borderRadius: 8, padding: '8px 10px' }}>Logout</button>
+    <main style={{ color: '#e2e8f0', display: 'grid', gridTemplateColumns: 'minmax(240px, 320px) minmax(0, 1fr)', gap: 18, padding: 20, minHeight: 700 }}>
+      <aside style={panel}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'start' }}>
+          <div><small style={{ color: '#94a3b8' }}>Signed in</small><div>{user.name}</div></div>
+          <button onClick={logout} disabled={busy} style={{ ...buttonStyle, background: '#334155' }}>Log out</button>
         </div>
-
-        <div style={{ marginTop: 24 }}>
-          <div style={{ color: '#cbd5e1', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>New project</div>
-          <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Project name" style={{ width: '100%', marginTop: 8, background: '#0f172a', border: '1px solid #334155', borderRadius: 10, padding: 12, color: '#e2e8f0', boxSizing: 'border-box' }} />
-          <button onClick={createProjectAndOpen} style={{ width: '100%', marginTop: 12, background: '#0ea5e9', color: 'white', borderRadius: 10, border: 'none', padding: '10px 16px', fontWeight: 700 }}>Create project</button>
+        {workspaces.length > 1 && <label style={{ display: 'block', marginTop: 20 }}>Workspace<select value={workspaceId} onChange={async (event) => { setWorkspaceId(event.target.value); setProject(null); try { const result = await projectApi.projects(event.target.value); setProjects(result.projects); } catch (error) { reportError(error); } }} style={inputStyle}>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>}
+        <h2 style={{ marginTop: 24 }}>Projects</h2>
+        <div style={{ display: 'grid', gap: 8 }}>
+          {projects.map((item) => <button key={item.id} onClick={() => openProject(item.id)} disabled={busy} style={{ ...buttonStyle, textAlign: 'left', background: project?.id === item.id ? '#164e63' : '#0f172a', border: '1px solid #334155' }}>
+            {item.name}<small style={{ display: 'block', color: '#94a3b8' }}>{item.status} · revision {item.currentRevision}</small>
+          </button>)}
+          {!projects.length && <p style={{ color: '#94a3b8' }}>No projects in this workspace yet.</p>}
         </div>
-
-        <div style={{ marginTop: 28 }}>
-          <div style={{ color: '#cbd5e1', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Projects</div>
-          <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
-            {projects.map((project) => (
-              <button key={project.id} onClick={() => setSelectedProjectId(project.id)} style={{ textAlign: 'left', background: project.id === selectedProjectId ? '#0f172a' : '#020817', border: project.id === selectedProjectId ? '1px solid #22d3ee' : '1px solid #1e293b', color: '#e2e8f0', borderRadius: 12, padding: '10px 12px' }}>
-                <div style={{ fontWeight: 700 }}>{project.name}</div>
-                <div style={{ color: '#94a3b8', fontSize: 12 }}>{project.status} · rev {project.currentRevision}</div>
-              </button>
-            ))}
-          </div>
+        <div style={{ display: 'grid', gap: 8, marginTop: 18 }}>
+          <input value={projectName} onChange={(event) => setProjectName(event.target.value)} aria-label="New project name" style={inputStyle} />
+          <button onClick={createProject} disabled={busy || !workspaceId} style={buttonStyle}>Create project</button>
         </div>
       </aside>
 
-      <div style={{ background: '#020817', border: '1px solid #1e293b', borderRadius: 18, padding: 20 }}>
-        {!selectedProjectId || !selectedDoc ? (
-          <div style={{ color: '#94a3b8' }}>No live project selected.</div>
-        ) : (
-          <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, borderBottom: '1px solid #1e293b', paddingBottom: 16 }}>
-              <div>
-                <div style={{ color: '#94a3b8', fontSize: 12, letterSpacing: 1, textTransform: 'uppercase' }}>Active project</div>
-                <h3 style={{ margin: '6px 0 0', fontSize: 28 }}>{activeProject?.name}</h3>
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={saveCurrentProject} style={{ background: '#16a34a', color: 'white', border: 'none', borderRadius: 10, padding: '10px 14px', fontWeight: 700 }}>Save project</button>
-                {activeProject?.status === 'archived' ? (
-                  <button onClick={restoreSelected} style={{ background: '#0f172a', border: '1px solid #334155', color: '#e2e8f0', borderRadius: 10, padding: '10px 14px' }}>Restore</button>
-                ) : (
-                  <button onClick={archiveSelected} style={{ background: '#0f172a', border: '1px solid #334155', color: '#e2e8f0', borderRadius: 10, padding: '10px 14px' }}>Archive</button>
-                )}
-              </div>
+      <section style={panel}>
+        {!project ? <div><h1>Project workspace</h1><p style={{ color: '#94a3b8' }}>Create or open a project. Project data is loaded from the authenticated API.</p></div> : <>
+          <header style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'start', borderBottom: '1px solid #1e293b', paddingBottom: 16 }}>
+            <div><small style={{ color: '#94a3b8' }}>Project · {project.status} · revision {project.currentRevision}</small><h1 style={{ margin: '6px 0' }}>{project.name}</h1><span>{project.description}</span></div>
+            {project.status === 'active' && project.ownerId === user.id && <button onClick={archive} disabled={busy} style={{ ...buttonStyle, background: '#7f1d1d' }}>Archive</button>}
+          </header>
+          {project.status === 'active' && <section style={{ ...panel, marginTop: 18 }}>
+            <h2>Add a room (metres)</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: 8 }}>
+              <input aria-label="Room name" value={roomForm.name} onChange={(event) => setRoomForm({ ...roomForm, name: event.target.value })} style={inputStyle} />
+              <input aria-label="Room length metres" type="number" min="0.01" step="0.01" value={roomForm.length} onChange={(event) => setRoomForm({ ...roomForm, length: event.target.value })} style={inputStyle} />
+              <input aria-label="Room width metres" type="number" min="0.01" step="0.01" value={roomForm.width} onChange={(event) => setRoomForm({ ...roomForm, width: event.target.value })} style={inputStyle} />
+              <input aria-label="Room height metres" type="number" min="0.01" step="0.01" value={roomForm.height} onChange={(event) => setRoomForm({ ...roomForm, height: event.target.value })} style={inputStyle} />
+              <button onClick={addRoom} disabled={busy} style={buttonStyle}>Add room</button>
             </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 16, marginTop: 20 }}>
-              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-                <div style={{ color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Project</div>
-                <div style={{ marginTop: 8, fontSize: 18, fontWeight: 700 }}>{selectedDoc.project.name}</div>
-                <div style={{ color: '#cbd5e1', marginTop: 4 }}>{selectedDoc.project.description || 'No description yet.'}</div>
-              </div>
-              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-                <div style={{ color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Rooms</div>
-                <div style={{ marginTop: 8, fontSize: 18, fontWeight: 700 }}>{selectedDoc.floors.reduce((count: number, floor: any) => count + floor.rooms.length, 0)}</div>
-              </div>
-              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-                <div style={{ color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>Objects</div>
-                <div style={{ marginTop: 8, fontSize: 18, fontWeight: 700 }}>{selectedDoc.objects.length}</div>
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.9fr', gap: 16, marginTop: 22 }}>
-              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-                <div style={{ fontWeight: 700, marginBottom: 12 }}>Floor plan</div>
-                {selectedDoc.floors.map((floor: any) => (
-                  <div key={floor.id} style={{ display: 'grid', gap: 8 }}>
-                    {floor.rooms.length === 0 ? <div style={{ color: '#94a3b8' }}>No rooms yet.</div> : floor.rooms.map((room: any) => (
-                      <div key={room.id} style={{ background: '#020817', border: '1px solid #334155', borderRadius: 10, padding: 12 }}>
-                        <div style={{ fontWeight: 700 }}>{room.name}</div>
-                        <div style={{ color: '#cbd5e1', fontSize: 13, marginTop: 4 }}>L {room.lengthMeters}m · W {room.widthMeters}m · H {room.heightMeters}m</div>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-                <button onClick={addRoom} style={{ marginTop: 14, background: '#0ea5e9', color: 'white', border: 'none', borderRadius: 10, padding: '10px 14px', fontWeight: 700 }}>Add room</button>
-              </div>
-
-              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-                <div style={{ fontWeight: 700, marginBottom: 12 }}>3D scene</div>
-                {selectedDoc.objects.length === 0 ? <div style={{ color: '#94a3b8' }}>No objects placed yet.</div> : selectedDoc.objects.map((object: any) => (
-                  <div key={object.id} style={{ background: '#020817', border: '1px solid #334155', borderRadius: 10, padding: 12, marginBottom: 8 }}>
-                    <div style={{ fontWeight: 700 }}>{object.name}</div>
-                    <div style={{ color: '#cbd5e1', fontSize: 13, marginTop: 4 }}>{object.category} · size {object.dimensionsMeters.x}m × {object.dimensionsMeters.y}m × {object.dimensionsMeters.z}m</div>
-                  </div>
-                ))}
-                <button onClick={addObject} style={{ marginTop: 8, background: '#0ea5e9', color: 'white', border: 'none', borderRadius: 10, padding: '10px 14px', fontWeight: 700 }}>Place object</button>
-              </div>
-            </div>
-
-            <div style={{ marginTop: 22, background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-              <div style={{ fontWeight: 700, marginBottom: 12 }}>Measurement provenance</div>
-              {selectedDoc.measurements.length === 0 ? <div style={{ color: '#94a3b8' }}>No measurements recorded.</div> : selectedDoc.measurements.map((measurement: any) => (
-                <div key={measurement.id} style={{ background: '#020817', border: '1px solid #334155', borderRadius: 10, padding: 12, marginBottom: 8 }}>
-                  <div style={{ fontWeight: 700 }}>{measurement.label}</div>
-                  <div style={{ color: '#cbd5e1', fontSize: 13, marginTop: 4 }}>{measurement.value} {measurement.unit} · source: {measurement.provenance.source} · method: {measurement.provenance.method}</div>
-                </div>
-              ))}
-            </div>
-
-            <div style={{ marginTop: 22, background: '#0f172a', border: '1px solid #1e293b', borderRadius: 14, padding: 16 }}>
-              <div style={{ fontWeight: 700, marginBottom: 12 }}>Project sharing</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="Invite collaborator email" style={{ flex: 1, background: '#020817', border: '1px solid #334155', borderRadius: 10, padding: 12, color: '#e2e8f0' }} />
-                <button onClick={shareProject} style={{ background: '#0f172a', border: '1px solid #334155', color: '#e2e8f0', borderRadius: 10, padding: '10px 16px' }}>Share</button>
-              </div>
-              <div style={{ marginTop: 10, color: '#94a3b8' }}>{activeProject?.sharedWith.length ? `Shared with ${activeProject.sharedWith.length} collaborator(s).` : 'Not shared yet.'}</div>
-            </div>
-
-            {message && <div style={{ marginTop: 18, color: '#e2e8f0' }}>{message}</div>}
-          </>
-        )}
-      </div>
-    </div>
+          </section>}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 18 }}>
+            <section style={panel}><h2>Floor plan data · {roomCount} room(s)</h2>
+              {project.document.floors.map((floor) => <div key={floor.id}><h3>{floor.name}</h3>{floor.rooms.map((room) => <article key={room.id} style={{ borderTop: '1px solid #334155', padding: 10 }}><strong>{room.name}</strong><div>{room.lengthMeters} × {room.widthMeters} × {room.heightMeters} m</div><small>{(room.lengthMeters * room.widthMeters).toFixed(2)} m² · perimeter {(2 * (room.lengthMeters + room.widthMeters)).toFixed(2)} m</small><div>{floor.walls.filter((wall) => wall.roomId === room.id).length} walls</div></article>)}</div>)}
+            </section>
+            <section style={panel}><h2>Scene objects · {project.document.objects.length}</h2>
+              {project.document.objects.map((object) => <article key={object.id} style={{ borderTop: '1px solid #334155', padding: 10 }}><strong>{object.name}</strong><div>{object.dimensionsMeters.x} × {object.dimensionsMeters.y} × {object.dimensionsMeters.z} m</div><small>Position: {object.transform.position.x}, {object.transform.position.y}, {object.transform.position.z}</small></article>)}
+              {project.status === 'active' && <button onClick={addObject} disabled={busy || !['owner', 'editor'].includes((project as ApiProject & { role?: string }).role ?? 'owner')} style={{ ...buttonStyle, marginTop: 10 }}>Place object</button>}
+            </section>
+          </div>
+          <section style={{ ...panel, marginTop: 18 }}><h2>Measurement provenance</h2>
+            {project.document.measurements.length ? project.document.measurements.map((measurement) => <article key={measurement.id} style={{ padding: 10, borderTop: '1px solid #334155' }}><strong>{measurement.label}</strong><div>{measurement.value} {measurement.unit} · {measurement.provenance.source} · {measurement.provenance.method} · {measurement.provenance.reviewState}</div></article>) : <p style={{ color: '#94a3b8' }}>No measurement records yet.</p>}
+          </section>
+          <section style={{ ...panel, marginTop: 18 }}><h2>Revision history</h2>
+            {revisions.map((revision) => <article key={revision.id} style={{ padding: 8, borderTop: '1px solid #334155' }}>Revision {revision.number} · {revision.summary} · {new Date(revision.createdAt).toLocaleString()}</article>)}
+          </section>
+        </>}
+        {message && <p role="status" style={{ color: '#67e8f9', marginTop: 18 }}>{message}</p>}
+      </section>
+    </main>
   );
 };
