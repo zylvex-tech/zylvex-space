@@ -2,6 +2,14 @@
 
 A TypeScript + React + Three.js prototype for a spatial intelligence platform focused on CAD/BIM-style geometry, measurement provenance, and engineering-grade demos.
 
+## About ZYLVEX SPACE
+
+ZYLVEX SPACE is a product concept from Zylvex Technologies Ltd: a cross-platform environment for capturing, measuring, designing, understanding, managing, and sharing physical spaces and digital spatial assets. Its long-term goal is to connect workflows that are often spread across separate floor-planning, 3D design, reality-capture, collaboration, asset-management, and commerce tools.
+
+The intended product serves homeowners and renters, designers and architects, construction and property professionals, manufacturers and creators, educators, businesses, and—through a separately governed edition—authorised public institutions. A user should be able to create or import a representation of a space, work with its dimensions and objects, compare designs, collaborate, and preserve or share project records.
+
+The current repository is an engineering prototype, not the complete product. It contains a browser-based operations console and spatial-engine demonstrations, including a Three.js viewport, selected local geometry parsers, spatial math, analytics, and cryptographic integrity utilities. It does not yet provide production project accounts and persistence, server-enforced collaboration, billing, marketplace operations, or the full capture and mobile workflows described by the product vision. Product concepts and proposed capabilities below must not be treated as implemented features.
+
 This repository currently implements a browser-based operations console and spatial engine with:
 
 - a 3D engineering viewport using Three.js
